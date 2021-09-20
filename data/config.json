@@ -1,0 +1,13 @@
+{
+    "effect_chance": {
+        "fade_in": 12,
+        "line_move": 10,
+        "radial_blur": 5,
+        "slide": 2
+    },
+    "frame_count_mag": 1,
+    "ignore_sound_range": {
+        "min_silence_duration": 0.2,
+        "thres": 0.15
+    }
+}
