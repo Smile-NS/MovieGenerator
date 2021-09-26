@@ -85,10 +85,15 @@ def mk_video(width, height, fps, audio, images, output):
     sm.log('bpm', bpm)
     sm.log('tempo', f'{tempo}(sec)')
 
-    effect = video_effect.EffectManager(video, tempo, frame_time)
     ignore_time = audio.get_ignore_time()
     print('Start to apply effects to the pictures...')
-    video_effect.apply_effect(effect, width, height, ignore_time, img_list, 0, total_count, 0)
+
+    meta = {
+        'video': video,
+        'f_time': frame_time
+    }
+
+    video_effect.apply_effect(meta, width, height, tempo, ignore_time, img_list, 0, total_count, 0)
     print('Finished to apply effects.')
 
     video.release()
@@ -101,11 +106,10 @@ def mk_video(width, height, fps, audio, images, output):
     os.remove(temp)
     print('Removed the temp video file.')
     del audio
-    del effect
     print('Finished all processing.')
 
 
-ext_list = ['.png', '.PNG', ',.jpg', '.JPG', '.bmp', '.BMP']
+ext_list = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG', '.bmp', '.BMP']
 
 
 def find_all_files(folder):

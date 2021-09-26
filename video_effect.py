@@ -1,83 +1,123 @@
 import math
+from abc import ABCMeta, abstractmethod
+from enum import Enum
 
 import cv2
 import numpy as np
 import system_manager as sm
 from PIL import Image
 
+config = sm.get_config()
 
-class EffectManager:
 
-    def __init__(self, video, tempo, frame_time):
-        self.video = video
-        self.tempo = tempo
-        self.frame_time = frame_time
-        self.__frame_count = tempo // frame_time
-        self.__rem = 0
+class Effect(metaclass=ABCMeta):
 
-    def fade_in(self, img1, img2, in_f_count, total_f_count):
+    rem = 0.0
+
+    class EffectType(Enum):
+        NORMAL = 1
+        FADE_IN = 2
+        RADIAL_BLUR = 3
+        LINE_MOVE = 4
+        SLIDE = 5
+
+    def __init__(self, meta, total_time, e_type):
+        self.i = 0
+        self.video = meta['video']
+        self.f_time = meta['f_time']
+        self.total_f_count = int(total_time / self.f_time)
+        self.total_time = total_time
+        self.e_type = e_type
+
+    @abstractmethod
+    def mk_image(self):
+        pass
+
+    def apply(self):
+        default_count = self.total_f_count
+        while self.i < self.total_f_count:
+
+            rem_count = int(Effect.rem / self.f_time)
+            if rem_count != 0.0:
+                self.total_f_count += rem_count
+                Effect.rem -= self.f_time * rem_count
+
+            if self.i == default_count - 1:
+                Effect.rem += self.total_time % (default_count * self.f_time)
+
+            self.video.write(self.mk_image())
+            self.i += 1
+        return self.total_f_count
+
+
+class Normal(Effect):
+
+    def __init__(self, meta, img, total_time):
+        super().__init__(meta, total_time, self.EffectType.NORMAL)
+        self.img = img
+
+    def mk_image(self):
+        return self.img
+
+
+class FadeIn(Effect):
+
+    def __init__(self, meta, img1, img2, in_time, total_time):
+        super().__init__(meta, total_time, self.EffectType.FADE_IN)
         back = cv2.resize(img1, (img2.shape[1], img2.shape[0]))
         back = cv2.cvtColor(back, cv2.COLOR_BGR2RGB)
         back = Image.fromarray(back)
-        back = back.convert('RGBA')
+        self.back = back.convert('RGBA')
 
         over = cv2.cvtColor(img2, cv2.COLOR_BGRA2RGBA)
         over = Image.fromarray(over)
-        over = over.convert('RGBA')
+        self.over = over.convert('RGBA')
 
-        alpha = 0
-        i = 0
-        while i < total_f_count:
+        self.alpha = 0.0
+        self.in_f_count = int(in_time / self.f_time)
 
-            if self.__rem // self.frame_time != 0:
-                total_f_count += 1
-                self.__rem -= self.frame_time
+    def mk_image(self):
+        if self.i < self.in_f_count:
+            self.alpha += 255 / self.in_f_count
+            self.over.putalpha(int(self.alpha))
+            frame = Image.alpha_composite(self.back, self.over)
+            frame = np.asarray(frame)
+        else:
+            frame = np.asarray(self.over)
 
-            if i < in_f_count:
-                alpha += 255 / in_f_count
-                over.putalpha(int(alpha))
-                frame = Image.alpha_composite(back, over)
-                frame = np.asarray(frame)
-            else:
-                frame = np.asarray(over)
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-            if i == self.__frame_count - 1:
-                self.__rem += self.tempo - (self.frame_time * self.__frame_count)
+class RadialBlur(Effect):
 
-            self.video.write(frame)
-            i += 1
+    def __init__(self, meta, img1, img2, in_time, total_time, min_ratio, iterations, margin):
+        super().__init__(meta, total_time, self.EffectType.RADIAL_BLUR)
+        self.img1 = img1
+        self.img2 = img2
+        self.in_f_count = int(in_time / self.f_time)
+        self.ratio = 1.0
+        self.change = (1.0 - min_ratio) / self.in_f_count
+        self.iterations = iterations
+        self.margin = margin
 
-        return total_f_count
+    def mk_image(self):
+        if self.i < self.in_f_count:
+            self.ratio -= self.change
+            pos = (self.img1.shape[1] // 2, self.img1.shape[0] // 2)
+            frame = self.radial_blur_frame(self.img1, pos)
+        else:
+            frame = self.img2
 
-    def normal(self, img, f_count):
-        i = 0
-        while i < f_count:
+        return frame
 
-            if self.__rem // self.frame_time != 0:
-                f_count += 1
-                self.__rem -= self.frame_time
-
-            if i == self.__frame_count - 1:
-                self.__rem += self.tempo - (self.frame_time * self.__frame_count)
-
-            self.video.write(img)
-            i += 1
-
-        return f_count
-
-    @staticmethod
-    def __radial_blur_frame(src, pos, ratio, iterations, margin):
+    def radial_blur_frame(self, src, pos):
         h, w = src.shape[0:2]
-        n = iterations
-        m = margin
+        n = self.iterations
+        m = self.margin
 
-        # 背景を作成する．お好みで255を0にすると黒背景にできる．
-        bg = np.ones(src.shape, dtype=np.uint8) * 255
+        bg = np.ones(src.shape, dtype=np.uint8) * 0
         bg = cv2.resize(bg, (int(m * w), int(m * h)))
 
-        # 背景の中心に元画像を配置
         bg[int((m - 1) * h / 2):int((m - 1) * h / 2) + h, int((m - 1) * w / 2):int((m - 1) * w / 2) + w] = src
 
         image_list = []
@@ -86,9 +126,8 @@ class EffectManager:
         c_x = pos[0] * m
         c_y = pos[1] * m
 
-        # 縮小画像の作成
         for i in range(n):
-            r = ratio + (1 - ratio) * (i + 1) / n
+            r = self.ratio + (1 - self.ratio) * (i + 1) / n
             shrunk = cv2.resize(src, (int(r * w), int(r * h)))
             left = int((1 - r) * c_x)
             right = left + shrunk.shape[1]
@@ -97,107 +136,93 @@ class EffectManager:
             bg[top:bottom, left:right] = shrunk
             image_list.append(bg.astype(np.int32))
 
-        # 最終的な出力画像の作成
         dst = sum(image_list) / n
         dst = dst.astype(np.uint8)
 
-        r = (1 + ratio) / 2
+        r = (1 + self.ratio) / 2
         dst = dst[int((1 - r) * c_y):int(((1 - r) * c_y + h) * r), int((1 - r) * c_x):int(((1 - r) * c_x + w) * r)]
         dst = cv2.resize(dst, (int(w / m), int(h / m)))
         return dst
 
-    def radial_blur(self, img1, img2, in_f_count, total_f_count, min_ratio, iterations, margin):
-        i = 0
-        ratio = 1.0
-        change = (1.0 - min_ratio) / in_f_count
-        while i < total_f_count:
 
-            if self.__rem // self.frame_time != 0:
-                total_f_count += 1
-                self.__rem -= self.frame_time
+class LineMove(Effect):
 
-            if i < in_f_count:
-                ratio -= change
-                pos = (img1.shape[1] // 2, img1.shape[0] // 2)
-                frame = self.__radial_blur_frame(img1, pos, ratio, iterations, margin)
-            else:
-                frame = img2
+    def __init__(self, meta, img, total_time, ratio, from_pos, to_pos):
+        super().__init__(meta, total_time, self.EffectType.LINE_MOVE)
+        self.img = img
+        self.width = img.shape[1]
+        self.height = img.shape[0]
+        self.from_x = from_pos[0]
+        self.from_y = from_pos[1]
+        self.to_x = to_pos[0]
+        self.to_y = to_pos[1]
 
-            if i == self.__frame_count - 1:
-                self.__rem += self.tempo - (self.frame_time * self.__frame_count)
+        area = self.height * self.width * ratio
+        tan = self.height / self.width
+        self.a = math.sqrt(area / tan)
+        self.b = self.a * tan
 
-            self.video.write(frame)
-            i += 1
+        self.dis, self.angle = self.get_line(
+            self.from_x, self.from_y,
+            self.to_x, self.to_y,
+            self.a, self.b)
 
-        return total_f_count
+        self.dis_per_frame = self.dis / self.total_f_count
+        self.dc = self.dis_per_frame * math.cos(self.angle)
+        self.ds = self.dis_per_frame * math.sin(self.angle)
 
-    def line_move(self, img, f_count, ratio, from_pos, to_pos):
-        width = img.shape[1]
-        height = img.shape[0]
-        from_x = from_pos[0]
-        from_y = from_pos[1]
-        to_x = to_pos[0]
-        to_y = to_pos[1]
+    def mk_image(self):
+        x1 = 0
+        y1 = 0
+        if self.from_y == self.to_y:
+            y1 = self.from_y
+            x1 = self.i * self.dis_per_frame + self.from_x if self.from_x < self.to_x else \
+                (self.total_f_count - self.i - 1) * self.dis_per_frame + self.to_x if self.from_x > self.to_x \
+                else 0
+        elif self.from_x == self.to_x:
+            x1 = self.from_x
+            y1 = self.i * self.dis_per_frame + self.from_y if self.from_y < self.to_y else \
+                (self.total_f_count - self.i - 1) * self.dis_per_frame + self.to_y if self.from_y > self.to_y \
+                else 0
+        if self.from_x < self.to_x:
+            if self.from_y < self.to_y:
+                x1 = self.i * self.dc + self.from_x
+                y1 = self.i * self.ds + self.from_y
+            elif self.from_y > self.to_y:
+                x1 = self.i * self.dc + self.from_x
+                y1 = (self.total_f_count - self.i - 1) * self.ds + self.to_y
+        elif self.from_x > self.to_x:
+            if self.from_y < self.to_y:
+                x1 = -(self.i * self.dc) + self.from_x - self.a
+                y1 = self.i * self.ds + self.from_y
+            elif self.from_y > self.to_y:
+                x1 = -((self.total_f_count - self.i - 1) * self.dc) + self.from_x - self.a
+                y1 = (self.total_f_count - self.i - 1) * self.ds + self.to_y
 
-        area = height * width * ratio
-        tan = height / width
-        a = math.sqrt(area / tan)
-        b = a * tan
+        x2 = x1 + self.a
+        y2 = y1 + self.b
 
-        dis, angle = self.__get_line(from_x, from_y, to_x, to_y, a, b)
+        x1, x2 = self.__fix(x1, x2, self.width, self.a)
+        y1, y2 = self.__fix(y1, y2, self.height, self.b)
 
-        dis_per_frame = dis / f_count
-        dc = dis_per_frame * math.cos(angle)
-        ds = dis_per_frame * math.sin(angle)
+        cut = self.img[int(y1): int(y2), int(x1): int(x2)]
+        cut = cv2.resize(cut, (self.width, self.height))
 
-        i = 0
-        while i < f_count:
+        return cut
 
-            if self.__rem // self.frame_time != 0:
-                f_count += 1
-                self.__rem -= self.frame_time
+    @staticmethod
+    def get_line(x1, y1, x2, y2, a, b):
+        angle = math.atan((y2 - y1) / (x2 - x1)) if x1 != x2 and y1 != y2 else 0
 
-            x1 = 0
-            y1 = 0
-            if from_y == to_y:
-                y1 = from_y
-                x1 = i * dis_per_frame + from_x if from_x < to_x \
-                    else (f_count - i - 1) * dis_per_frame + to_x if from_x > to_x else 0
-            elif from_x == to_x:
-                x1 = from_x
-                y1 = i * dis_per_frame + from_y if from_y < to_y \
-                    else (f_count - i - 1) * dis_per_frame + to_y if from_y > to_y else 0
-            if from_x < to_x:
-                if from_y < to_y:
-                    x1 = i * dc + from_x
-                    y1 = i * ds + from_y
-                elif from_y > to_y:
-                    x1 = i * dc + from_x
-                    y1 = (f_count - i - 1) * ds + to_y
-            elif from_x > to_x:
-                if from_y < to_y:
-                    x1 = -(i * dc) + from_x - a
-                    y1 = i * ds + from_y
-                elif from_y > to_y:
-                    x1 = -((f_count - i - 1) * dc) + from_x - a
-                    y1 = (f_count - i - 1) * ds + to_y
+        if (x1 < x2 and y1 > y2) or (x1 > x2 and y1 < y2):
+            angle *= -1
 
-            x2 = x1 + a
-            y2 = y1 + b
+        x2 += -a if x1 < x2 else a if x1 > x2 else 0
+        y2 += -b if y1 < y2 else b if y1 > y2 else 0
 
-            x1, x2 = self.__fix(x1, x2, width, a)
-            y1, y2 = self.__fix(y1, y2, height, b)
+        dis = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
-            cut = img[int(y1): int(y2), int(x1): int(x2)]
-            cut = cv2.resize(cut, (width, height))
-
-            if i == self.__frame_count - 1:
-                self.__rem += self.tempo - (self.frame_time * self.__frame_count)
-
-            self.video.write(cut)
-            i += 1
-
-        return f_count
+        return dis, angle
 
     @staticmethod
     def __fix(val1, val2, max_val, dif):
@@ -217,99 +242,78 @@ class EffectManager:
 
         return val1, val2
 
-    @staticmethod
-    def __get_line(x1, y1, x2, y2, a, b):
-        angle = math.atan((y2 - y1) / (x2 - x1)) if x1 != x2 and y1 != y2 else 0
 
-        if (x1 < x2 and y1 > y2) or (x1 > x2 and y1 < y2):
-            angle *= -1
+class Slide(Effect):
 
-        x2 += -a if x1 < x2 else a if x1 > x2 else 0
-        y2 += -b if y1 < y2 else b if y1 > y2 else 0
+    def __init__(self, meta, img, total_time):
+        super().__init__(meta, total_time, self.EffectType.SLIDE)
+        self.img = img
+        self.height = img.shape[0]
+        self.width = img.shape[1]
+        self.dis = self.height // self.total_f_count * 2
 
-        dis = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        self.offset_y = 0
 
-        return dis, angle
+    def mk_image(self):
+        back = np.full((self.height, self.width, 3), 0, dtype=np.uint8)
 
-    def slide(self, img, f_count):
-        height = img.shape[0]
-        width = img.shape[1]
-        dis = height // f_count * 2
+        if self.offset_y > self.height:
+            cut1 = self.img[0: self.height - (self.offset_y - self.height), 0: self.width // 2]
+            cut2 = self.img[self.offset_y - self.height: self.height, self.width // 2: self.width]
+            back[self.height - cut1.shape[0]: self.height, 0: cut1.shape[1]] = cut1
+            back[0: cut2.shape[0], cut1.shape[1]: cut1.shape[1] + cut2.shape[1]] = cut2
+        else:
+            cut1 = self.img[self.height - self.offset_y: self.height, 0: self.width // 2]
+            cut2 = self.img[0: self.offset_y, self.width // 2: self.width]
+            back[self.offset_y - cut1.shape[0]: self.offset_y, 0: cut1.shape[1]] = cut1
+            back[self.height - self.offset_y: self.height - (self.offset_y - cut2.shape[0]),
+            cut1.shape[1]: cut1.shape[1] + cut2.shape[1]] = cut2
 
-        offset_y = 0
-        i = 0
-        while i < f_count:
-            back = np.full((height, width, 3), 0, dtype=np.uint8)
+        self.offset_y += self.dis
 
-            if self.__rem // self.frame_time != 0:
-                f_count += 1
-                self.__rem -= self.frame_time
-
-            if offset_y > height:
-                cut1 = img[0: height - (offset_y - height), 0: width // 2]
-                cut2 = img[offset_y - height: height, width // 2: width]
-                back[height - cut1.shape[0]: height, 0: cut1.shape[1]] = cut1
-                back[0: cut2.shape[0], cut1.shape[1]: cut1.shape[1] + cut2.shape[1]] = cut2
-            else:
-                cut1 = img[height - offset_y: height, 0: width // 2]
-                cut2 = img[0: offset_y, width // 2: width]
-                back[offset_y - cut1.shape[0]: offset_y, 0: cut1.shape[1]] = cut1
-                back[height - offset_y: height - (offset_y - cut2.shape[0]),
-                cut1.shape[1]: cut1.shape[1] + cut2.shape[1]] = cut2
-
-            offset_y += dis
-            if i == self.__frame_count - 1:
-                self.__rem += self.tempo - (self.frame_time * self.__frame_count)
-
-            self.video.write(back)
-            i += 1
-
-        return f_count
+        return back
 
 
-def apply_effect(effect, width, height, ignore_time, img_list, i, total_count, index):
+def apply_effect(meta, width, height, tempo, ignore_time, img_list, i, total_count, index):
     start = ignore_time[0]
     end = ignore_time[len(ignore_time) - 1]
-    frame_time = effect.frame_time
-    e_count = int(effect.tempo / frame_time)
     back = np.full((height, width, 3), 0, dtype=np.uint8)
     img = img_list[index] if index < len(img_list) else back
+    f_time = meta['f_time']
 
     if i >= total_count:
         return
 
-    start_count = to_frame_count(e_count, frame_time, start[1])
-    if start[0] == 0 and 0 < start[1] - start[0] and i < start_count:
-        i += effect.fade_in(back, img, start_count, start_count)
-        apply_effect(effect, width, height, ignore_time, img_list, i, total_count, index + 1)
+    start_time = to_tempo(tempo, start[1])
+    if index == 0 and start[0] // tempo == 0.0 and 0.0 < start[1] - start[0]:
+        i += FadeIn(meta, back, img, start_time, start_time).apply() - 1
+        apply_effect(meta, width, height, tempo, ignore_time, img_list, i, total_count, index + 1)
         return
 
-    end1 = to_frame_count(e_count, frame_time, end[0])
-    end2 = to_frame_count(e_count, frame_time, end[1])
-    end_count = end2 - end1
-    if (total_count - end_count) - end1 <= e_count and end1 <= i:
-        effect.fade_in(img, back, end_count, end_count)
+    end1 = to_tempo(tempo, end[0])
+    end2 = to_tempo(tempo, end[1])
+    end_time = end2 - end1
+    if end1 <= (i + 1) * f_time and (total_count * f_time - end_time) - end1 <= tempo:
+        FadeIn(meta, img, back, end_time, end_time).apply()
         return
 
     r = int(np.random.rand() * 100)
 
-    config = sm.get_config()
-    fade_in = config['effect_chance']['fade_in']
-    radial_blur = config['effect_chance']['radial_blur'] + fade_in
-    slide = config['effect_chance']['slide'] + radial_blur
-    line_move = config['effect_chance']['line_move'] + slide
+    scope = 'effect_chance'
+    fade_in = config[scope]['fade_in']
+    radial_blur = config[scope]['radial_blur'] + fade_in
+    slide = config[scope]['slide'] + radial_blur
+    line_move = config[scope]['line_move'] + slide
     fc_mag = config['frame_count_mag']
 
-    e_count *= fc_mag
+    total_time = tempo * fc_mag
+
     if 0 <= r < fade_in and 0 < index < len(img_list):
-        i += effect.fade_in(img_list[index - 1], img, e_count // 2, e_count)
-        e_type = 'fade_in'
+        effect = FadeIn(meta, img_list[index - 1], img, total_time / 2, total_time)
     elif fade_in <= r < radial_blur and 0 < index < len(img_list):
-        i += effect.radial_blur(img_list[index - 1], img, 15, e_count, 0.5, 20, 1.3)
-        e_type = 'radial_blur'
+        effect = RadialBlur(meta, img_list[index - 1], img, 0.25, total_time, 0.5, 20, 1.3)
     elif radial_blur <= r < slide:
-        i += effect.slide(img, e_count * 4)
-        e_type = 'slide'
+        effect = Slide(meta, img, total_time * 4)
     elif slide <= r < line_move:
         pos_x = [0, img.shape[1]]
         pos_y = [0, img.shape[0], img.shape[0] // 2]
@@ -322,15 +326,20 @@ def apply_effect(effect, width, height, ignore_time, img_list, i, total_count, i
         to_pos[0] = pos_x[0 if from_pos[0] == pos_x[1] else 1]
         to_pos[1] = pos_y[2 if from_pos[1] == pos_y[2] else 0 if from_pos[1] == pos_y[1] else 1]
 
-        i += effect.line_move(img, e_count, 0.75, from_pos, to_pos)
-        e_type = 'line_move'
+        effect = LineMove(meta, img, total_time, 0.75, from_pos, to_pos)
     else:
-        i += effect.normal(img, e_count)
-        e_type = 'normal'
+        effect = Normal(meta, img, total_time)
 
-    print(f'Effect: {e_type}')
-    apply_effect(effect, width, height, ignore_time, img_list, i, total_count, index + 1)
+    c = effect.apply()
+    i += c
+    print(f'Effect: {effect.e_type.name}')
+    print(f'Used frame: {c}')
+    del effect
+
+    if index == 0:
+        i -= 1
+    apply_effect(meta, width, height, tempo, ignore_time, img_list, i, total_count, index + 1)
 
 
-def to_frame_count(count, frame_time, time):
-    return count * ((time / frame_time) // count)
+def to_tempo(tempo, time):
+    return tempo * (time // tempo)
